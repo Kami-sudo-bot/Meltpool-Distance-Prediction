@@ -133,7 +133,7 @@ def get_model() -> nn.Module:
     return model
 
 
-def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, device: str) -> None:
+def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, device: str) -> tuple[int, float]:
     full_ds = MeltpoolDataset(csv_path=csv_path, img_dir=img_dir, transform=transform)
     val_frac = 0.20
     n_val = int(len(full_ds) * val_frac)
@@ -177,14 +177,19 @@ def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, dev
             best_epoch = epoch
             torch.save(model.state_dict(), f'resnet18_{tag}.pt')
     print(f'{tag} ▶ Best Epoch: {best_epoch}, val_MSE={best_val_loss:.4f}\n')
+    return best_epoch, best_val_loss
 
 
 def main(csv_path: str, img_dir: str) -> None:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    results: list[tuple[str, int, float]] = []
     for tag, tfm in mask_transforms.items():
         print(f'=== TRAINING START: {tag} ===')
-        train_model(csv_path, img_dir, tfm, tag, device)
+        best_epoch, best_loss = train_model(csv_path, img_dir, tfm, tag, device)
+        results.append((tag, best_epoch, best_loss))
+    df = pd.DataFrame(results, columns=['mask', 'best_epoch', 'best_val_MSE'])
     print('=== ALL TRAINING DONE ===')
+    print(df.to_string(index=False))
 
 
 if __name__ == '__main__':
