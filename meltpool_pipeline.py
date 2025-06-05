@@ -10,6 +10,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms as T
 from torchvision.models import resnet18
 from tqdm.auto import tqdm
+import matplotlib.pyplot as plt
 
 
 class MeltpoolDataset(Dataset):
@@ -167,6 +168,8 @@ def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, dev
 
     best_val_loss = float('inf')
     best_epoch = -1
+    train_losses = []
+    val_losses = []
     for epoch in range(1, 6):
         model.train()
         train_loss_sum = 0.0
@@ -179,6 +182,7 @@ def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, dev
             optimizer.step()
             train_loss_sum += loss.item() * xb.size(0)
         train_loss = train_loss_sum / len(train_loader.dataset)
+        train_losses.append(train_loss)
 
         model.eval()
         val_loss_sum = 0.0
@@ -188,12 +192,26 @@ def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, dev
                 preds = model(xb)
                 val_loss_sum += loss_fn(preds, yb).item() * xb.size(0)
         val_loss = val_loss_sum / len(val_loader.dataset)
+        val_losses.append(val_loss)
         print(f'{tag} Epoch {epoch}/5  train_MSE={train_loss:.4f}  val_MSE={val_loss:.4f}')
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             best_epoch = epoch
             torch.save(model.state_dict(), f'resnet18_{tag}.pt')
+
+    epochs = range(1, len(train_losses) + 1)
+    plt.figure()
+    plt.plot(epochs, train_losses, label='train')
+    plt.plot(epochs, val_losses, label='val')
+    plt.xlabel('Epoch')
+    plt.ylabel('MSE Loss')
+    plt.title(f'{tag} Loss Curves')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(f'loss_curve_{tag}.png')
+    plt.close()
+
     print(f'{tag} ▶ Best Epoch: {best_epoch}, val_MSE={best_val_loss:.4f}\n')
 
 
