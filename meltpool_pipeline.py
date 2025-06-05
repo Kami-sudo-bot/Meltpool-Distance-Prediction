@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 from PIL import Image
 from sklearn.cluster import DBSCAN
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -31,6 +32,19 @@ class MeltpoolDataset(Dataset):
             img = self.transform(img)
         target = torch.tensor(row['nozzel_distance'], dtype=torch.float32)
         return img, target
+
+
+def validate_dataset(csv_path: str, img_dir: str) -> pd.DataFrame:
+    """Verify that every image listed in the CSV exists in ``img_dir``."""
+    df = pd.read_csv(csv_path)
+    missing: list[str] = []
+    for img_name in df['image']:
+        if not os.path.isfile(os.path.join(img_dir, img_name)):
+            missing.append(img_name)
+    if missing:
+        raise FileNotFoundError(f"Missing images: {missing}")
+    print(f"Dataset check passed: {len(df)} entries")
+    return df
 
 
 # ----------------------------- mask transforms -----------------------------
@@ -198,16 +212,33 @@ def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, dev
     return best_epoch, best_val_loss
 
 
-def main(csv_path: str, img_dir: str) -> None:
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+def train_all(csv_path: str, img_dir: str, device: str) -> pd.DataFrame:
+    """Train models for all mask variants."""
     results: list[tuple[str, int, float]] = []
     for tag, tfm in mask_transforms.items():
         print(f'=== TRAINING START: {tag} ===')
         best_epoch, best_loss = train_model(csv_path, img_dir, tfm, tag, device)
         results.append((tag, best_epoch, best_loss))
     df = pd.DataFrame(results, columns=['mask', 'best_epoch', 'best_val_MSE'])
+    return df
+
+
+def plot_results(df: pd.DataFrame) -> None:
+    """Visualize validation losses for each mask."""
+    ax = df.plot(kind='bar', x='mask', y='best_val_MSE', legend=False)
+    ax.set_ylabel('Best Validation MSE')
+    ax.set_title('Mask comparison')
+    plt.tight_layout()
+    plt.show()
+
+
+def main(csv_path: str, img_dir: str) -> None:
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    validate_dataset(csv_path, img_dir)
+    df = train_all(csv_path, img_dir, device)
     print('=== ALL TRAINING DONE ===')
     print(df.to_string(index=False))
+    plot_results(df)
 
 
 if __name__ == '__main__':
