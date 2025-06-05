@@ -110,6 +110,13 @@ class BBoxMask:
 
 mask_transforms = {
     'baseline': T.Compose([T.Resize((128, 128)), T.ToTensor()]),
+    'baseline_aug': T.Compose([
+        T.Resize((128, 128)),
+        T.RandomHorizontalFlip(),
+        T.RandomVerticalFlip(),
+        T.RandomRotation(30),
+        T.ToTensor(),
+    ]),
     'nozzle': T.Compose([T.Resize((128, 128)), NozzleMask(), T.ToTensor()]),
     'threshold': T.Compose([T.Resize((128, 128)), ThresholdMask(), T.ToTensor()]),
     'dbscan': T.Compose([T.Resize((128, 128)), DBSCANMask(), T.ToTensor()]),
@@ -120,6 +127,17 @@ mask_transforms = {
         ThresholdMask(),
         DBSCANMask(),
         BBoxMask(seg_func=ThresholdMask()),
+        T.ToTensor(),
+    ]),
+    'all_masks_aug': T.Compose([
+        T.Resize((128, 128)),
+        NozzleMask(),
+        ThresholdMask(),
+        DBSCANMask(),
+        BBoxMask(seg_func=ThresholdMask()),
+        T.RandomHorizontalFlip(),
+        T.RandomVerticalFlip(),
+        T.RandomRotation(30),
         T.ToTensor(),
     ])
 }
