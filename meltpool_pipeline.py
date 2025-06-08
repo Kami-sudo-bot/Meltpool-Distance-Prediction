@@ -13,6 +13,15 @@ from torchvision.models import resnet18
 from tqdm.auto import tqdm
 
 
+def mount_google_drive() -> None:
+    """Mount Google Drive inside Colab if possible."""
+    try:
+        from google.colab import drive
+        drive.mount('/content/drive')
+    except Exception as exc:  # pragma: no cover - colab only
+        print(f'Could not mount Google Drive: {exc}')
+
+
 class MeltpoolDataset(Dataset):
     """Dataset for meltpool distance prediction."""
 
@@ -223,6 +232,23 @@ def train_all(csv_path: str, img_dir: str, device: str) -> pd.DataFrame:
     return df
 
 
+def evaluate_model(csv_path: str, img_dir: str, weights: str, transform: T.Compose, device: str) -> float:
+    """Evaluate a trained model on a dataset and return MSE."""
+    ds = MeltpoolDataset(csv_path, img_dir, transform)
+    loader = DataLoader(ds, batch_size=32, shuffle=False)
+    model = get_model().to(device)
+    model.load_state_dict(torch.load(weights, map_location=device))
+    model.eval()
+    loss_fn = nn.MSELoss()
+    loss_sum = 0.0
+    with torch.no_grad():
+        for xb, yb in loader:
+            xb, yb = xb.to(device), yb.to(device).unsqueeze(1)
+            preds = model(xb)
+            loss_sum += loss_fn(preds, yb).item() * xb.size(0)
+    return loss_sum / len(loader.dataset)
+
+
 def plot_results(df: pd.DataFrame) -> None:
     """Visualize validation losses for each mask."""
     ax = df.plot(kind='bar', x='mask', y='best_val_MSE', legend=False)
@@ -232,13 +258,27 @@ def plot_results(df: pd.DataFrame) -> None:
     plt.show()
 
 
-def main(csv_path: str, img_dir: str) -> None:
+def main(csv_path: str, img_dir: str, test_csv: str | None = None, test_imgs: str | None = None,
+         mount_drive: bool = False) -> None:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if mount_drive:
+        mount_google_drive()
+
     validate_dataset(csv_path, img_dir)
     df = train_all(csv_path, img_dir, device)
     print('=== ALL TRAINING DONE ===')
     print(df.to_string(index=False))
     plot_results(df)
+
+    if test_csv and test_imgs:
+        validate_dataset(test_csv, test_imgs)
+        best_row = df.loc[df['best_val_MSE'].idxmin()]
+        best_mask = best_row['mask']
+        weights_path = f'resnet18_{best_mask}.pt'
+        print(f'=== TESTING BEST MODEL ({best_mask}) ===')
+        test_mse = evaluate_model(test_csv, test_imgs, weights_path,
+                                  mask_transforms[best_mask], device)
+        print(f'Test MSE = {test_mse:.4f}')
 
 
 if __name__ == '__main__':
@@ -247,6 +287,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train meltpool distance models with various masks')
     parser.add_argument('--csv', required=True, help='Path to labels_train.csv')
     parser.add_argument('--imgs', required=True, help='Path to directory with TIFF images')
+    parser.add_argument('--test-csv', help='Path to labels_test.csv for evaluation')
+    parser.add_argument('--test-imgs', help='Path to directory with test images')
+    parser.add_argument('--mount-drive', action='store_true', help='Mount Google Drive (for Colab)')
     args = parser.parse_args()
 
-    main(args.csv, args.imgs)
+    main(args.csv, args.imgs, test_csv=args.test_csv, test_imgs=args.test_imgs, mount_drive=args.mount_drive)
