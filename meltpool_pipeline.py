@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, ConcatDataset
 from torchvision import transforms as T
 from torchvision.models import resnet18
 from tqdm.auto import tqdm
@@ -174,13 +174,15 @@ def get_model() -> nn.Module:
     return model
 
 
-def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, device: str) -> tuple[int, float]:
-    full_ds = MeltpoolDataset(csv_path=csv_path, img_dir=img_dir, transform=transform)
+def train_on_dataset(dataset: torch.utils.data.Dataset, tag: str, device: str) -> tuple[int, float]:
+    """Train ``resnet18`` on the provided dataset and return best epoch and loss."""
     val_frac = 0.20
-    n_val = int(len(full_ds) * val_frac)
-    n_train = len(full_ds) - n_val
-    train_ds, val_ds = torch.utils.data.random_split(full_ds, [n_train, n_val],
-                                                    generator=torch.Generator().manual_seed(42))
+    n_val = int(len(dataset) * val_frac)
+    n_train = len(dataset) - n_val
+    train_ds, val_ds = torch.utils.data.random_split(
+        dataset, [n_train, n_val], generator=torch.Generator().manual_seed(42)
+    )
+
     train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=32, shuffle=False)
 
@@ -221,32 +223,54 @@ def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, dev
     return best_epoch, best_val_loss
 
 
+def train_model(csv_path: str, img_dir: str, transform: T.Compose, tag: str, device: str) -> tuple[int, float]:
+    dataset = MeltpoolDataset(csv_path=csv_path, img_dir=img_dir, transform=transform)
+    return train_on_dataset(dataset, tag, device)
+
+
+def train_masks(csv_path: str, img_dir: str, masks: list[str], device: str) -> pd.DataFrame:
+    """Train one model per mask and return a summary ``DataFrame``."""
+    records: list[dict[str, float | str | int]] = []
+    for mask_name in masks:
+        tfm = mask_transforms[mask_name]
+        print(f'=== TRAINING START: {mask_name} ===')
+        best_epoch, best_loss = train_model(csv_path, img_dir, tfm, mask_name, device)
+        records.append({'mask': mask_name, 'best_epoch': best_epoch, 'best_val_MSE': best_loss,
+                        'weights': f'resnet18_{mask_name}.pt'})
+    return pd.DataFrame(records)
+
+
+def train_combined(csv_path: str, img_dir: str, masks: list[str], device: str) -> tuple[int, float]:
+    """Train a single model on a concatenation of the datasets for ``masks``."""
+    datasets = [MeltpoolDataset(csv_path, img_dir, mask_transforms[m]) for m in masks]
+    combined_ds = ConcatDataset(datasets)
+    return train_on_dataset(combined_ds, 'combined', device)
+
+
 def train_all(csv_path: str, img_dir: str, device: str) -> pd.DataFrame:
-    """Train models for all mask variants."""
-    results: list[tuple[str, int, float]] = []
-    for tag, tfm in mask_transforms.items():
-        print(f'=== TRAINING START: {tag} ===')
-        best_epoch, best_loss = train_model(csv_path, img_dir, tfm, tag, device)
-        results.append((tag, best_epoch, best_loss))
-    df = pd.DataFrame(results, columns=['mask', 'best_epoch', 'best_val_MSE'])
-    return df
+    """Backward compatible helper calling :func:`train_masks` for all masks."""
+    return train_masks(csv_path, img_dir, list(mask_transforms.keys()), device)
 
 
-def evaluate_model(csv_path: str, img_dir: str, weights: str, transform: T.Compose, device: str) -> float:
-    """Evaluate a trained model on a dataset and return MSE."""
-    ds = MeltpoolDataset(csv_path, img_dir, transform)
-    loader = DataLoader(ds, batch_size=32, shuffle=False)
+
+def run_inference_on_directory(img_dir: str, weights: str, transform: T.Compose, device: str) -> pd.DataFrame:
+    """Run inference on every image in ``img_dir`` and return predictions."""
     model = get_model().to(device)
     model.load_state_dict(torch.load(weights, map_location=device))
     model.eval()
-    loss_fn = nn.MSELoss()
-    loss_sum = 0.0
-    with torch.no_grad():
-        for xb, yb in loader:
-            xb, yb = xb.to(device), yb.to(device).unsqueeze(1)
-            preds = model(xb)
-            loss_sum += loss_fn(preds, yb).item() * xb.size(0)
-    return loss_sum / len(loader.dataset)
+    records: list[dict[str, float | str]] = []
+    for name in sorted(os.listdir(img_dir)):
+        if not name.lower().endswith(('.png', '.jpg', '.jpeg', '.tif', '.tiff')):
+            continue
+        img = Image.open(os.path.join(img_dir, name)).convert('L')
+        inp = transform(img).unsqueeze(0).to(device)
+        with torch.no_grad():
+            pred = model(inp).item()
+        records.append({'image': name, 'prediction': pred})
+        print(f'{name}: {pred:.4f}')
+    df = pd.DataFrame(records)
+    df.to_csv('drive_predictions.csv', index=False)
+    return df
 
 
 def plot_results(df: pd.DataFrame) -> None:
@@ -258,27 +282,32 @@ def plot_results(df: pd.DataFrame) -> None:
     plt.show()
 
 
-def main(csv_path: str, img_dir: str, test_csv: str | None = None, test_imgs: str | None = None,
-         mount_drive: bool = False) -> None:
+def main(csv_path: str, img_dir: str, masks: list[str], combine: bool, testdrive: bool, mount_drive: bool) -> None:
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    if mount_drive:
+    if mount_drive or testdrive:
         mount_google_drive()
 
     validate_dataset(csv_path, img_dir)
-    df = train_all(csv_path, img_dir, device)
-    print('=== ALL TRAINING DONE ===')
-    print(df.to_string(index=False))
-    plot_results(df)
+    df = train_masks(csv_path, img_dir, masks, device)
 
-    if test_csv and test_imgs:
-        validate_dataset(test_csv, test_imgs)
-        best_row = df.loc[df['best_val_MSE'].idxmin()]
-        best_mask = best_row['mask']
-        weights_path = f'resnet18_{best_mask}.pt'
-        print(f'=== TESTING BEST MODEL ({best_mask}) ===')
-        test_mse = evaluate_model(test_csv, test_imgs, weights_path,
-                                  mask_transforms[best_mask], device)
-        print(f'Test MSE = {test_mse:.4f}')
+    if combine:
+        best_epoch, best_loss = train_combined(csv_path, img_dir, masks, device)
+        df = pd.concat([df, pd.DataFrame([{'mask': 'combined', 'best_epoch': best_epoch,
+                                           'best_val_MSE': best_loss, 'weights': 'resnet18_combined.pt'}])],
+                       ignore_index=True)
+
+    print('=== TRAINING SUMMARY ===')
+    print(df.to_string(index=False))
+
+    best_row = df.loc[df['best_val_MSE'].idxmin()]
+    print(f"Best model: {best_row['mask']} -> {best_row['best_val_MSE']:.4f}")
+
+    if testdrive:
+        drive_dir = '/content/drive/MyDrive/Testdaten/'
+        print(f'=== INFERENCE ON DRIVE DATA ({drive_dir}) ===')
+        run_inference_on_directory(drive_dir, best_row['weights'],
+                                   mask_transforms[best_row['mask']], device)
+    plot_results(df)
 
 
 if __name__ == '__main__':
@@ -287,9 +316,12 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Train meltpool distance models with various masks')
     parser.add_argument('--csv', required=True, help='Path to labels_train.csv')
     parser.add_argument('--imgs', required=True, help='Path to directory with TIFF images')
-    parser.add_argument('--test-csv', help='Path to labels_test.csv for evaluation')
-    parser.add_argument('--test-imgs', help='Path to directory with test images')
+    parser.add_argument('--masks', nargs='+', default=['baseline', 'nozzle', 'threshold', 'dbscan'],
+                        help='Mask names to train individually')
+    parser.add_argument('--combine', action='store_true', help='Also train on all masks combined')
+    parser.add_argument('--testdrive', action='store_true', help='Run inference on Google Drive test data')
     parser.add_argument('--mount-drive', action='store_true', help='Mount Google Drive (for Colab)')
     args = parser.parse_args()
 
-    main(args.csv, args.imgs, test_csv=args.test_csv, test_imgs=args.test_imgs, mount_drive=args.mount_drive)
+    main(args.csv, args.imgs, masks=args.masks, combine=args.combine,
+         testdrive=args.testdrive, mount_drive=args.mount_drive)
